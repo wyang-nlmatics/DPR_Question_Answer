@@ -3,6 +3,7 @@ import json
 from bs4 import BeautifulSoup
 
 def squad_processing(f):
+    examples = []
     with open(f) as file:
         data = json.load(file)
     for par in data['data']:
@@ -11,10 +12,12 @@ def squad_processing(f):
             context = elem['context']
             if title.lower() not in context[:100].lower():
                 context = title + " " + context
-                elem['context'] = context
-                for chunk in elem['qas']:
-                    for ans in chunk['answers']:
-                        ans['answer_start'] += len(title)+1
+            for chunk in elem['qas']:
+                data_elem = {}
+                data_elem['question'] = chunk['question']
+                data_elem['document_text'] = context
+                examples.append(data_elem)
+    return examples
 
 def NQ_processing(f):
     examples = []
@@ -25,23 +28,22 @@ def NQ_processing(f):
         result = json.loads(json_str)
         file_data.append(result)
     for chunk in file_data:
-        for elem in chunk['annotations']:
-            long_a = elem['long_answer']
-            short_a = elem['short_answers']
-            yn_a = elem['yes_no_answer']
-            long_a_text = ""
-            started = False
-            for i in range(long_a['start_token'], long_a['end_token']):
-                if not chunk['document_tokens'][i]['html_token']:
-                    if chunk['document_tokens'][i]['token'][0].lower() not in "abcdefghijklmnopqrstuvwxyz" or not started:
-                        long_a_text += chunk['document_tokens'][i]['token']
-                        started = True
-                    else:
-                        long_a_text += " " + chunk['document_tokens'][i]['token']
-            examples.append([chunk['document_tokens'], long_a_text, [long_a['start_token'], long_a['end_token']]])
+        data_elem = {}
+        data_elem['question'] = chunk['question_text']
+        doc_string = ""
+        started = False
+        for elem in chunk['document_tokens']:
+            if not elem['html_token']:
+                if elem['token'][0].lower() not in "abcdefghijklmnopqrstuvwxyz" or not started:
+                    doc_string += elem['token']
+                    started = True
+                else:
+                    doc_string += " " + elem['token']
+        data_elem['document_text'] = doc_string
+        examples.append(data_elem)
     return examples
 
-NQ_processing(".././Data/NQ/v1.0_sample_nq-dev-sample.jsonl")
+print(squad_processing(".././Data/squad2.0/dev-v2.0.json"))
 
 
 
