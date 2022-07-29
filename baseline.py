@@ -21,13 +21,30 @@ import random
 from torch.nn import CosineSimilarity
 from torch.nn.functional import normalize
 
-
 from IPython import embed
 from sklearn.metrics import classification_report
+import argparse
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') 
-print('Device: ', device)
-torch.cuda.empty_cache()
+torch.cuda.empty_cache() 
+
+"""
+python baseline.py --eval_data cuad/CUAD_v1-clean-0.json --ixs_data cuad/CUAD_v1-clean-ix-0.csv
+
+python baseline.py --eval_data pubmed/full_clean_small.json --ixs_data pubmed/pubmed-pubmed-ix.csv
+
+python baseline.py --eval_data pubmed/full_clean_small.json --ixs_data pubmed/pubmed-pubmed-ix.csv
+
+python baseline.py --eval_data scotus/train-clean-new.json --ixs_data scotus/train-ix.csv
+python baseline.py --eval_data scotus/dev-clean-new.json --ixs_data scotus/dev-ix.csv
+
+python baseline.py --eval_data cuad/CUAD_v1-clean-lite.json --bm25 True
+
+python baseline.py --eval_data nfcorpus/dev-clean.json --bm25 True
+
+python baseline.py --eval_data scotus/dev-clean-new.json --bm25 True
+
+python baseline.py --eval_data squad/dev-clean.json --bm25 True
+"""
 
 
 def embed_contexts(contexts, tokenizer, encoder):
@@ -78,7 +95,7 @@ class SimpleDataset(Dataset):
             question_encoder = DPRQuestionEncoder.from_pretrained('facebook/dpr-question_encoder-single-nq-base').to(device)
             context_encoder = DPRContextEncoder.from_pretrained('facebook/dpr-ctx_encoder-single-nq-base').to(device)
 
-
+        #embed()
         self.context_embeds = embed_contexts(context, context_tokenizer, context_encoder)
         self.query_embeds = embed_queries(query, question_tokenizer, question_encoder)
         self.map  = QC_map
@@ -96,7 +113,6 @@ class SimpleDataset(Dataset):
         context_embeds[0] = self.context_embeds[ self.map[int(batch_ixs[0])]  ]
         label = self.map[idx]
         return ( query_embed, context_embeds, batch_ixs[0:-1], label )
-
 
 
 # find the indices of the k max elements,
@@ -117,6 +133,33 @@ def sample(j, nums, blocked):
         if r not in blocked:
             true.append(r)
     return true[0:20]
+
+def make_batches(name, x, k_hard=10, j_rand=20):
+    file = open(name+ '/' + name + '-' + str(name) + '-ix.csv', 'w+', newline ='\n')
+    tokenized_corpus = [word_tokenize(a) for a in x['text']]
+
+    # DESIGNING BATCHES
+    rows = []
+    print('making batches')
+    bm25 = BM25Okapi([word_tokenize(con) for con in x['text']])
+    for i in tqdm(range(len(x['question']))):
+
+        doc_scores = bm25.get_scores(x['question'][i])
+
+        correct = x['map'][str(i)] 
+        
+        hard_ix = kmax(k_hard, doc_scores, correct)
+        rand_ix = sample(j_rand, doc_scores, hard_ix + [correct])
+        
+        answers = [correct] + hard_ix + rand_ix
+        rows.append(answers)
+    
+    with file:   
+        write = csv.writer(file)
+        write.writerows(rows)
+
+    return x, rows
+
 
 def squad_processing(f, k_hard=10, j_rand=20, make_batches=False):
     fname = f.split('/')[-1].split('.')[0]
@@ -213,101 +256,108 @@ def run_BM(query, bm25):
     return np.argmax(scores)
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--eval_data', dest='eval_data', help='Name of the eval data file', required=False, default='sample')
+    parser.add_argument('--ixs_data', dest='ixs_data', help='name of indices file', required=False, default='')
+    parser.add_argument('--bm25', dest='bm25', required=False, default=False)
 
-    
-    #print('Processing squad!')
-    #x, rows = squad_processing("squad/train-v2.0.json")
-    #print('train text size: ', len(x['text']))
-    #print('train questions size: ', len(x['question']))
 
-    #x, rows = squad_processing("squad/dev-v2.0.json", make_batches=False)
+    args = parser.parse_args()
 
-    # Opening JSON file
-    f = open('squad/dev-v2-clean.json')
+    f = open(args.eval_data)
     x = json.load(f)
-    f.close()
+    qc_map = {int(k):int(v) for k,v in x['map'].items()}
     #embed()
 
-
-    qc_map = {int(k):int(v) for k,v in x['map'].items()}
     y_true = [qc_map[i] for i in range(len(x['question']))]
     y_pred = []
-    batch_ixs = pd.read_csv('squad/squad-dev-v2-ix.csv', index_col=None, header=None).values
-    #embed()
-    #embed()
 
-    #ixs.iloc[idx].values
+    if args.bm25:
+        print('running bm25!')
+        bm25 = BM25Okapi([word_tokenize(con) for con in x['text']])
+
+        CUTOFF = len(x['question']) # USE CUTOFF TO MAKE LIFE EASIER SOMETIMES
+        counter = 0
+        for q in tqdm(x['question']):
+
+            y_pred.append( run_BM( q, bm25) )
+
+            counter += 1
+            if counter > CUTOFF: 
+                break
+
+        
+        print('BM25 baselines for ', args.eval_data)
+        #print(classification_report(y_true, y_pred))
+        print(classification_report(y_true[:CUTOFF], y_pred[:CUTOFF]))
+    else:
+        if args.ixs_data != '':
+            batch_ixs = pd.read_csv(args.ixs_data, index_col=None, header=None).values
+            f.close()
+        else:
+            assert 1 == 0 # break the code cuz we need ixs!
+
+        
+        dataset = SimpleDataset(x['text'], x['question'], qc_map, batch_ixs)
+        dataloader = DataLoader(dataset, batch_size=50)
+        
+        y_pred = []
+        y_label = []
+
+        #context_embeds = dataset.context_embeds
+        #context_embeds = [torch.tensor(context_embeds[j][0]) for j in range(len(context_embeds))]
+        #context_embeds = [torch.tensor(dataset.context_embeds[j][0][0]) for j in range(len(dataset.context_embeds))]
 
 
-    """
-    # running predictions!
-    bm25 = BM25Okapi([word_tokenize(con) for con in x['text']])
-    for q in tqdm(x['question']):
-        y_pred.append( run_BM( q, bm25) )
-    
-    print('BM25 baselines for SQUAD')
-    print(classification_report(y_true, y_pred))
-    
-    """
-    #embed()
-
-    
-    #context_embeds = embed_contexts(x['text'])
-    #for i in tqdm(range(len(x['question']))):
-    #    y_pred.append( run_DPR(x['question'][i] , context_embeds) )
-    
-    #print(classification_report(y_true, y_pred))
-
-    dataset = SimpleDataset(x['text'], x['question'], qc_map, batch_ixs)
-    dataloader = DataLoader(dataset, batch_size=50)
-    
-    y_pred = []
-    y_label = []
-
-    #context_embeds = dataset.context_embeds
-    #context_embeds = [torch.tensor(context_embeds[j][0]) for j in range(len(context_embeds))]
-    #context_embeds = [torch.tensor(dataset.context_embeds[j][0][0]) for j in range(len(dataset.context_embeds))]
-
-
-    for step, (query, context, ixs, label) in tqdm(enumerate(dataloader)): 
-        print(step)
-        #embed()
-
-        context_embeds = []
-        # reorganize! because we didn't remake the collate function :(
-        for j in range(len(context)):
-            new = []
-            for k in range(len(context[j])):
-                new.append(context[j][k])
-            context_embeds.append(torch.stack(new))
-        context_embeds = torch.stack(context_embeds).permute(1,0,2,3)
-
-        #embed()        
-            
-
-        for i in range(len(query)): # this should be batch size
-            #embed()
-            question_embed = query[i] #.detach()
-            #embed()
-            pred = run_DPR(question_embed, context_embeds[i], ixs[i])
-            y_pred.append(pred)
-            y_label.append(label[i].item())
-            print('pred', pred)
-            print('label', label[i].item())
+        for step, (query, context, ixs, label) in tqdm(enumerate(dataloader)): 
+            print(step)
             #embed()
 
-            #for j in range(len(context_embeds)):
-            #    context_embed = torch.tensor(context_embeds[j][0])#[0]#.cpu().numpy()
-            #    pred = run_DPR(question_embed, context_embeds)
-            #    y_pred.append(pred)
-            #    y_label.append(labels[i])
-                #print(y_pred)
-                #print(y_label)
+            context_embeds = []
+            # reorganize! because we didn't remake the collate function :(
+            for j in range(len(context)):
+                new = []
+                for k in range(len(context[j])):
+                    new.append(context[j][k])
+                context_embeds.append(torch.stack(new))
+            context_embeds = torch.stack(context_embeds).permute(1,0,2,3)
+
+            #embed()        
+            #embed()
+            #ixs = torch.stack(ixs).T
+            for i in range(len(query)): # this should be batch size
+                print(i)
+                #embed()
+                question_embed = query[i] #.detach()
+                #embed()
+                pred = run_DPR(question_embed, context_embeds[i], ixs[i])
+                y_pred.append(pred)
+                y_label.append(label[i].item())
+                print('pred', pred)
+                print('label', label[i].item())
                 #embed()
 
-    embed()
-    print(classification_report(y_label, y_pred))
+                #for j in range(len(context_embeds)):
+                #    context_embed = torch.tensor(context_embeds[j][0])#[0]#.cpu().numpy()
+                #    pred = run_DPR(question_embed, context_embeds)
+                #    y_pred.append(pred)
+                #    y_label.append(labels[i])
+                    #print(y_pred)
+                    #print(y_label)
+                    #embed()
 
-    
+        #embed()
+        print(classification_report(y_label, y_pred))
+
+if torch.cuda.is_available():    
+    # Tell PyTorch to use the GPU.    
+    device = torch.device("cuda")
+    print('There are %d GPU(s) available.' % torch.cuda.device_count())
+    print('We will use the GPU:', torch.cuda.get_device_name(0))
+# If not...
+else:
+    print('No GPU available, using the CPU instead.')
+    device = torch.device("cpu")
 
 main()
+
